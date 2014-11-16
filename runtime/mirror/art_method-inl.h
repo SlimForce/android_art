@@ -367,11 +367,28 @@ inline QuickMethodFrameInfo ArtMethod::GetQuickFrameInfo() {
   // Direct method is cloned from original java.lang.reflect.Proxy class together with code
   // and as a result it is executed as usual quick compiled method without any stubs.
   // So the frame info should be returned as it is a quick method not a stub.
-  if (UNLIKELY(IsAbstract()) || UNLIKELY(IsProxyMethod() && !IsDirect())) {
+  if ( UNLIKELY(IsAbstract() || IsXposedHookedMethod()) || UNLIKELY(IsProxyMethod(true) && !IsDirect())) {
     return runtime->GetCalleeSaveMethodFrameInfo(Runtime::kRefsAndArgs);
   }
+  
   if (UNLIKELY(IsRuntimeMethod())) {
     return runtime->GetRuntimeMethodFrameInfo(this);
+  }
+
+  // For Proxy method we add special handling for the direct method case  (there is only one
+  // direct method - constructor). Direct method is cloned from original
+  // java.lang.reflect.Proxy class together with code and as a result it is executed as usual
+  // quick compiled method without any stubs. So the frame info should be returned as it is a
+  // quick method not a stub. However, if instrumentation stubs are installed, the
+  // instrumentation->GetQuickCodeFor() returns the artQuickProxyInvokeHandler instead of an
+  // oat code pointer, thus we have to add a special case here.
+  if (UNLIKELY(IsProxyMethod(true))) {
+    if (IsDirect()) {
+      CHECK(IsConstructor());
+      return GetQuickFrameInfo(EntryPointToCodePointer(GetEntryPointFromQuickCompiledCode()));
+    } else {
+      return runtime->GetCalleeSaveMethodFrameInfo(Runtime::kRefsAndArgs);
+    }
   }
 
   const void* entry_point = runtime->GetInstrumentation()->GetQuickCodeFor(this, sizeof(void*));
@@ -463,6 +480,9 @@ inline const char* ArtMethod::GetName() {
 }
 
 inline const DexFile::CodeItem* ArtMethod::GetCodeItem() {
+  if (UNLIKELY(IsXposedHookedMethod())) {
+    return nullptr;
+  }
   mirror::ArtMethod* method = GetInterfaceMethodIfProxy();
   return method->GetDexFile()->GetCodeItem(method->GetCodeItemOffset());
 }
@@ -530,12 +550,12 @@ inline mirror::DexCache* ArtMethod::GetDexCache() {
   return GetInterfaceMethodIfProxy()->GetDeclaringClass()->GetDexCache();
 }
 
-inline bool ArtMethod::IsProxyMethod() {
-  return GetDeclaringClass()->IsProxyClass();
+inline bool ArtMethod::IsProxyMethod(bool ignore_xposed) {
+  return GetDeclaringClass()->IsProxyClass() || (!ignore_xposed && IsXposedHookedMethod());
 }
 
 inline ArtMethod* ArtMethod::GetInterfaceMethodIfProxy() {
-  if (LIKELY(!IsProxyMethod())) {
+  if (LIKELY(!IsProxyMethod(true))) {
     return this;
   }
   mirror::Class* klass = GetDeclaringClass();
